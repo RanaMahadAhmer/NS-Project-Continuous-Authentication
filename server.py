@@ -6,28 +6,54 @@ import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List, Tuple, Dict
+import hashlib
+import hmac
+import secrets
 
 
-# Define UserBehavior dataclass
 @dataclass
 class UserBehavior:
-    typing_speed: float  # WPM
-    keystroke_intervals: List[float]  # milliseconds
-    mouse_movement: List[Tuple[int, int]]  # x, y coordinates
-    mouse_velocity: float  # pixels/second
-    idle_time: float  # seconds
+    typing_speed: float
+    keystroke_intervals: List[float]
+    mouse_movement: List[Tuple[int, int]]
+    mouse_velocity: float
+    idle_time: float
 
 
-# ContinuousAuthenticator class
 class ContinuousAuthenticator:
     def __init__(self, security_threshold: float = 0.85):
         self.model = RandomForestClassifier(n_estimators=100)
         self.scaler = StandardScaler()
         self.security_threshold = security_threshold
-        self.trained = False
+        self.session_key = secrets.token_hex(32)
+        self.trusted_devices = {}
+
+    def generate_device_signature(self, device_info: Dict) -> str:
+        """Generate unique device signature using device characteristics"""
+        device_str = ''.join(str(v) for v in device_info.values())
+        return hashlib.sha256(device_str.encode()).hexdigest()
+
+    def register_device(self, device_info: Dict) -> str:
+        """Register a trusted device"""
+        signature = self.generate_device_signature(device_info)
+        token = secrets.token_hex(16)
+        self.trusted_devices[signature] = {
+            'token': token,
+            'timestamp': time.time()
+        }
+        return token
+
+    def verify_device(self, device_info: Dict, token: str) -> bool:
+        """Verify if device is trusted"""
+        signature = self.generate_device_signature(device_info)
+        if signature in self.trusted_devices:
+            stored_token = self.trusted_devices[signature]['token']
+            return hmac.compare_digest(stored_token, token)
+        return False
 
     def extract_features(self, behavior: UserBehavior) -> np.ndarray:
+        """Extract features from user behavior"""
         features = [
             behavior.typing_speed,
             np.mean(behavior.keystroke_intervals),
@@ -35,6 +61,7 @@ class ContinuousAuthenticator:
             behavior.mouse_velocity,
             behavior.idle_time
         ]
+
         if behavior.mouse_movement:
             x_coords, y_coords = zip(*behavior.mouse_movement)
             features.extend([
@@ -45,86 +72,101 @@ class ContinuousAuthenticator:
             ])
         else:
             features.extend([0, 0, 0, 0])
+
         return np.array(features).reshape(1, -1)
 
-    def train(self, user_data: List[UserBehavior]):
-        if not user_data:
-            raise ValueError("No training data provided.")
-        X, y = [], []
-        for behavior in user_data:
+    def train(self, legitimate_behaviors: List[UserBehavior], impostor_behaviors: List[UserBehavior]):
+        """Train the authentication model"""
+        X = []
+        y = []
+
+        # Process legitimate user behaviors
+        for behavior in legitimate_behaviors:
             features = self.extract_features(behavior)
             X.append(features.flatten())
-            y.append(1)  # Mark all training data as legitimate
+            y.append(1)
+
+        # Process impostor behaviors
+        for behavior in impostor_behaviors:
+            features = self.extract_features(behavior)
+            X.append(features.flatten())
+            y.append(0)
+
         X = np.array(X)
-        self.scaler.fit(X)
-        self.model.fit(self.scaler.transform(X), y)
-        self.trained = True
+        y = np.array(y)
+
+        # Scale features
+        X_scaled = self.scaler.fit_transform(X)
+
+        # Train model
+        self.model.fit(X_scaled, y)
 
     def authenticate(self, current_behavior: UserBehavior) -> Tuple[bool, float]:
-        if not self.trained:
-            raise RuntimeError("Model has not been trained.")
+        """Authenticate user based on current behavior"""
         features = self.extract_features(current_behavior)
         scaled_features = self.scaler.transform(features)
+
+        # Get authentication probability
         auth_prob = self.model.predict_proba(scaled_features)[0][1]
-        return auth_prob >= self.security_threshold, auth_prob
+
+        # Authenticate if probability exceeds threshold
+        is_authenticated = auth_prob >= self.security_threshold
+
+        return is_authenticated, auth_prob
 
 
-# Server function
-clients_data = {}  # Store client-specific training data
+# Server handling each client
+def handle_client(client_socket):
+    device_info = {}  # To store device registration info
+    authenticator = ContinuousAuthenticator(security_threshold=0.85)
 
-
-def handle_client(client_socket, address):
-    global clients_data
-    user_id = None
-    authenticator = ContinuousAuthenticator()
-
-    try:
-        while True:
-            # Receive serialized data
+    while True:
+        try:
             data = client_socket.recv(4096)
             if not data:
                 break
+
             message = pickle.loads(data)
+            
+            if message["type"] == "register":
+                # Register device
+                token = authenticator.register_device(message["device_info"])
+                client_socket.send(pickle.dumps({"status": "registered", "token": token}))
+                # print(message)
 
-            if message["action"] == "register":
-                user_id = message["user_id"]
-                if user_id not in clients_data:
-                    clients_data[user_id] = []
-                client_socket.send(pickle.dumps({"status": "registered"}))
+            elif message["type"] == "authenticate":
+                # Authenticate device using token
+                token = message["token"]
+                device_info = message["device_info"]
+                if authenticator.verify_device(device_info, token):
+                    client_socket.send(pickle.dumps({"status": "authenticated", "message": "Device authenticated"}))
+                else:
+                    client_socket.send(pickle.dumps({"status": "failed", "message": "Device authentication failed"}))
+                # print(message)
 
-            elif message["action"] == "train":
-                if not user_id:
-                    client_socket.send(pickle.dumps({"error": "Register first."}))
-                    continue
-                client_socket.send(pickle.dumps({"status": "training started"}))
-                start_time = time.time()
-                while time.time() - start_time < 60:  # 1 minute
-                    data = client_socket.recv(4096)
-                    if not data:
-                        break
-                    user_behavior = pickle.loads(data)
-                    clients_data[user_id].append(user_behavior)
-                client_socket.send(pickle.dumps({"status": "training stopped"}))
 
-            elif message["action"] == "stop_train":
-                if not user_id:
-                    client_socket.send(pickle.dumps({"error": "Register first."}))
-                    continue
-                authenticator.train(clients_data[user_id])
-                client_socket.send(pickle.dumps({"status": "model trained"}))
+            elif message["type"] == "train":
 
-            elif message["action"] == "authenticate":
-                if not user_id:
-                    client_socket.send(pickle.dumps({"error": "Register first."}))
-                    continue
-                user_behavior = message["data"]
-                is_auth, prob = authenticator.authenticate(user_behavior)
+                # Train the model
+                behaviors = message["behaviors"]
+                impostor_behaviors = message["impostor_behaviors"]
+                authenticator.train(behaviors, impostor_behaviors)
+                # print(message)
+                client_socket.send(
+                    pickle.dumps({"status": "training_complete", "message": "Model trained successfully"}))
+                # print(message)
+
+            elif message["type"] == "test":
+                # Test the model with new behavior
+                current_behavior = message["current_behavior"]
+                is_auth, prob = authenticator.authenticate(current_behavior)
                 client_socket.send(pickle.dumps({"authenticated": is_auth, "probability": prob}))
 
-    except Exception as e:
-        print(f"Error handling client {address}: {e}")
-    finally:
-        client_socket.close()
+        except Exception as e:
+            print(f"Error: {e}")
+            break
+
+    client_socket.close()
 
 
 def start_server(host='127.0.0.1', port=5555):
@@ -133,8 +175,8 @@ def start_server(host='127.0.0.1', port=5555):
     server.listen(5)
     print(f"Server listening on {host}:{port}")
     while True:
-        client_socket, address = server.accept()
-        client_thread = threading.Thread(target=handle_client, args=(client_socket, address))
+        client_socket, _ = server.accept()
+        client_thread = threading.Thread(target=handle_client, args=(client_socket,))
         client_thread.start()
 
 
