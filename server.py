@@ -99,7 +99,6 @@ class ContinuousAuthenticator:
         return is_authenticated, auth_prob
 
 
-# Server handling each client
 def handle_client(client_socket):
     device_info = {}
     authenticator = ContinuousAuthenticator(security_threshold=0.85)

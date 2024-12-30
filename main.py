@@ -102,7 +102,7 @@ class ContinuousAuthenticator:
         self.model.fit(X_scaled, y)
 
     def authenticate(self, current_behavior: UserBehavior) -> Tuple[bool, float]:
-        """Authenticate user based on current behavior"""
+
         features = self.extract_features(current_behavior)
         scaled_features = self.scaler.transform(features)
 
@@ -127,11 +127,11 @@ def test_passive_attack(authenticator: ContinuousAuthenticator,
         'average_attack_probability': 0
     }
 
-    # Test legitimate authentication
+
     is_auth, prob = authenticator.authenticate(legitimate_behavior)
     results['legitimate_auth'] = is_auth
 
-    # Test attack behaviors
+
     successful_attacks = 0
     attack_probs = []
 
@@ -147,9 +147,9 @@ def test_passive_attack(authenticator: ContinuousAuthenticator,
     return results
 
 
-# Example usage and testing
+
 def generate_sample_behavior(is_legitimate: bool = True) -> UserBehavior:
-    """Generate sample behavior data for testing"""
+
     base_typing_speed = 65 if is_legitimate else 45
     base_keystroke_interval = 200 if is_legitimate else 300
 
@@ -167,7 +167,7 @@ def generate_sample_behavior(is_legitimate: bool = True) -> UserBehavior:
 
 # Main execution
 if __name__ == "__main__":
-    # Initialize authenticator
+
     authenticator = ContinuousAuthenticator(security_threshold=0.85)
 
     # Generate training data
